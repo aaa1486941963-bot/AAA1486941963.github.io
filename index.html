@@ -292,9 +292,14 @@
   </div>
   <div class="fld">
     <label>离线模型包（网络下载不了模型时的终极方案，只需导入一次）</label>
-    <input type="file" id="modelPkgInput" accept=".zip,.json,.onnx,.txt" multiple style="display:none">
-    <button id="btnModelPkg" style="width:100%">📦 导入离线模型包（约27MB）</button>
+    <button id="btnModelDl" style="width:100%">📥 一键下载安装（推荐：约27MB，自动完成）</button>
     <div class="hint" id="modelPkgStatus"></div>
+    <details id="pkgManual" style="margin-top:8px">
+      <summary style="cursor:pointer;color:var(--sub);font-size:13px">手动导入模型包（别人用微信/网盘发你时点这里）</summary>
+      <input type="file" id="modelPkgInput" accept=".zip,.json,.onnx,.txt" multiple style="display:none">
+      <button id="btnModelPkg" style="width:100%;margin-top:8px">📦 选择模型包文件</button>
+      <div class="hint">微信里先点开收到的 zip 等它下载完，再回来点上面的按钮，文件一般出现在选择器的「最近」里；找不到时去 文件管理 → 内部存储 → Download 或 微信 → 下载 目录。</div>
+    </details>
   </div>
   <div class="hint" id="authInfo"></div>
   <div class="hint">提示：本地识别首次需下载模型（约40MB），建议 Wi-Fi；视频建议 5 分钟以内。</div>
@@ -1138,39 +1143,20 @@ async function loadJSZip() {   // 解包组件多线路懒加载（仅导入 zip
   }
   throw new Error('解包组件加载失败，请检查网络后重试');
 }
-async function importModelPackage(fileList) {
-  const files = [...fileList];
-  if (!files.length) return;
-  if (typeof caches === 'undefined') return toast('当前浏览器不支持离线存储，无法导入');
-  const st = $('modelPkgStatus');
-  const setSt = t => { st.textContent = t; };
-  // ① 收集 {仓库路径 → Blob}
-  const entries = new Map();
-  if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
-    setSt('正在解压模型包…');
-    const JZ = await loadJSZip();
-    const zip = await JZ.loadAsync(files[0]);
-    for (const name of Object.keys(zip.files)) {
-      const ent = zip.files[name];
-      if (ent.dir) continue;
-      const key = name.toLowerCase().replace(/^\/+/, '');
-      const path = MODEL_FILE_MAP[key] || MODEL_FILE_MAP[key.split('/').pop()];
-      if (path) entries.set(path, await ent.async('blob'));
-    }
-  } else {
-    for (const f of files) {
-      const path = MODEL_FILE_MAP[f.name.toLowerCase()];
-      if (path) entries.set(path, f);
-    }
+async function collectFromZipBlob(blob, entries) {   // zip → {仓库路径: Blob}
+  const JZ = await loadJSZip();
+  const zip = await JZ.loadAsync(blob);
+  for (const name of Object.keys(zip.files)) {
+    const ent = zip.files[name];
+    if (ent.dir) continue;
+    const key = name.toLowerCase().replace(/^\/+/, '');
+    const path = MODEL_FILE_MAP[key] || MODEL_FILE_MAP[key.split('/').pop()];
+    if (path) entries.set(path, await ent.async('blob'));
   }
-  // ② 校验完整性
+}
+async function writePkgToCache(entries) {   // 校验 + 写入浏览器仓库 + 记录标记
   const missing = PKG_REQUIRED.filter(p => !entries.has(p));
-  if (missing.length) {
-    setSt('❌ 模型包不完整，缺少：' + missing.join('、'));
-    return toast('模型包不完整，请核对后重新导入');
-  }
-  // ③ 写入浏览器仓库（Cache API，识别组件会从这里直接读取）
-  setSt('正在写入浏览器仓库（约43MB，请稍候）…');
+  if (missing.length) throw new Error('模型包不完整，缺少：' + missing.join('、'));
   const cache = await caches.open('transformers-cache');
   let total = 0;
   for (const [path, blob] of entries) {
@@ -1180,15 +1166,66 @@ async function importModelPackage(fileList) {
   }
   store.set('sc_model_pkg', { model: PKG_TINY_ID, files: entries.size, size: total, time: Date.now() });
   renderModelPkgStatus();
+}
+async function importModelPackage(fileList) {   // 手动导入（zip 或散文件）
+  const files = [...fileList];
+  if (!files.length) return;
+  if (typeof caches === 'undefined') return toast('当前浏览器不支持离线存储，无法导入');
+  const st = $('modelPkgStatus');
+  const entries = new Map();
+  if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
+    st.textContent = '正在解压模型包…';
+    await collectFromZipBlob(files[0], entries);
+  } else {
+    for (const f of files) {
+      const path = MODEL_FILE_MAP[f.name.toLowerCase()];
+      if (path) entries.set(path, f);
+    }
+  }
+  st.textContent = '正在写入浏览器仓库（约43MB，请稍候）…';
+  try { await writePkgToCache(entries); }
+  catch (e) { st.textContent = '❌ ' + e.message; return toast('模型包不完整，请核对后重新导入'); }
   toast('✅ 离线模型包导入成功！识别字幕将不再需要联网', 3600);
 }
+/* 一键下载安装：模型分卷与网页同源，点一下自动完成，无需找文件 */
+const PKG_PARTS = ['model-pkg-1.zip', 'model-pkg-2.zip'];
+$('btnModelDl').onclick = async () => {
+  const st = $('modelPkgStatus');
+  try {
+    if (typeof caches === 'undefined') return toast('当前浏览器不支持离线存储');
+    const entries = new Map();
+    for (let i = 0; i < PKG_PARTS.length; i++) {
+      st.textContent = `正在下载离线模型（${i + 1}/${PKG_PARTS.length}）：连接中…`;
+      const resp = await fetch(PKG_PARTS[i]);
+      if (!resp.ok) throw new Error(`${PKG_PARTS[i]} 下载失败（HTTP ${resp.status}）：请确认两个模型分卷文件已上传到网站仓库`);
+      const totalLen = +resp.headers.get('content-length') || 0;
+      const reader = resp.body.getReader();
+      const chunks = [];
+      let got = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value); got += value.length;
+        st.textContent = `正在下载离线模型（${i + 1}/${PKG_PARTS.length}）：${(got / 1048576).toFixed(1)}${totalLen ? ' / ' + (totalLen / 1048576).toFixed(1) : ''}MB`;
+      }
+      st.textContent = `正在解压（${i + 1}/${PKG_PARTS.length}）…`;
+      await collectFromZipBlob(new Blob(chunks), entries);
+    }
+    st.textContent = '正在写入浏览器仓库（约43MB，请稍候）…';
+    await writePkgToCache(entries);
+    toast('✅ 离线模型安装成功！识别字幕将不再需要联网', 3600);
+  } catch (e) {
+    console.error(e);
+    st.textContent = '❌ 安装失败：' + (e.message || e);
+  }
+};
 function renderModelPkgStatus() {
   const el = $('modelPkgStatus');
   if (!el) return;
   const pkg = modelPkgReady();
   el.textContent = pkg
-    ? `✅ 已导入离线模型包（${pkg.files} 个文件 / 约 ${Math.round(pkg.size / 1048576)}MB），识别字幕直接使用，无需联网`
-    : '未导入。若「识别字幕」反复提示模型下载失败：向分享者索要模型包（约27MB，网盘/微信传输均可），在此导入一次即可永久离线识别';
+    ? `✅ 已安装离线模型（${pkg.files} 个文件 / 约 ${Math.round(pkg.size / 1048576)}MB），识别字幕直接使用，无需联网`
+    : '未安装。点上方「一键下载安装」自动完成（约27MB，建议 Wi-Fi）；安装一次，永久离线识别';
 }
 $('btnModelPkg').onclick = () => { $('modelPkgInput').value = ''; $('modelPkgInput').click(); };
 $('modelPkgInput').onchange = async e => {
