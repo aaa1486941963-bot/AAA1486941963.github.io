@@ -1064,8 +1064,9 @@ $('btnASR').onclick = () => {
 function whisperHosts() {
   const hosts = [];
   if (/^https?:$/.test(location.protocol)) hosts.push(location.origin + '/hf'); // ① 中转服务（有则最稳）
-  hosts.push('https://huggingface.co');  // ② 官方（允许浏览器跨域）
-  hosts.push('https://hf-mirror.com');   // ③ 国内镜像（部分网络可用）
+  hosts.push('https://modelscope.cn/models'); // ② 阿里 ModelScope：国内 CDN、跨域全开，最稳
+  hosts.push('https://huggingface.co');  // ③ 官方（允许浏览器跨域，国内不可达）
+  hosts.push('https://hf-mirror.com');   // ④ 国内镜像（部分网络被拦）
   const good = store.get('sc_hf_host', '');   // 上次成功的源排最前：静态托管时跳过 404 中转与不可达源
   if (good && hosts.includes(good)) return [good, ...hosts.filter(h => h !== good)];
   return hosts;
